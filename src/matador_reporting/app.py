@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import calendar
+import hashlib
+import json
 import tempfile
 from datetime import date
 from pathlib import Path
@@ -245,7 +247,8 @@ def _email_template_page() -> None:
         years = tuple(range(date.today().year + 1, 2019, -1))
         selected_year = st.selectbox("Year", years, index=years.index(date.today().year), key="email_year")
     reporting_month = date(int(selected_year), MONTH_NAMES.index(month_name) + 1, 1)
-    if st.session_state.get("reporting_month") not in (None, reporting_month):
+    if (st.session_state.get("reporting_month") not in (None, reporting_month)
+            or st.session_state.get("location") not in (None, location)):
         st.session_state.pop("report_result", None)
 
     st.markdown('<p class="section-label">Upload source reports</p>', unsafe_allow_html=True)
@@ -334,6 +337,8 @@ def _email_template_page() -> None:
             use_container_width=True,
             key="download_email_results",
         )
+
+        _inline_dashboard_publish("email", result, st.session_state["reporting_month"], location=st.session_state["location"])
 
         st.markdown('<p class="section-label">Google Sheets destination</p>', unsafe_allow_html=True)
         spreadsheet_target = st.text_input(
@@ -508,6 +513,8 @@ def _matador_dashboard_page() -> None:
         key="download_dashboard_results",
     )
 
+    _inline_dashboard_publish("dashboard", result, st.session_state["dashboard_reporting_month"])
+
     st.markdown('<p class="section-label">Google Sheets destination</p>', unsafe_allow_html=True)
     same_sheet = st.checkbox(
         "Use the same spreadsheet as Email Template Performance",
@@ -651,6 +658,8 @@ def _lead_source_page() -> None:
         use_container_width=True,
         key="download_lead_source_results",
     )
+    _inline_dashboard_publish("leadSources", result, st.session_state["lead_source_reporting_month"])
+
     st.markdown('<p class="section-label">Google Sheets destination</p>', unsafe_allow_html=True)
     same_sheet = st.checkbox("Use the same spreadsheet as the other reports", value=True, key="lead_source_same_sheet")
     default_target = st.session_state.get("email_spreadsheet_target", _default_spreadsheet_target()) if same_sheet else ""
@@ -811,6 +820,8 @@ def _volie_sms_service_page() -> None:
         key="download_volie_service_results",
     )
 
+    _inline_dashboard_publish("volie", result, st.session_state["volie_service_reporting_month"])
+
     st.markdown('<p class="section-label">Google Sheets destination</p>', unsafe_allow_html=True)
     same_sheet = st.checkbox(
         "Use the same spreadsheet as the other reports",
@@ -855,53 +866,83 @@ def _volie_sms_service_page() -> None:
 
 
 
-def _publish_dashboard_page() -> None:
-    st.title("Publish to Dashboard")
-    st.info("Review a generated report before publishing. This commits only the selected report to reports.json in GitHub. Your website will read it after deployment and refresh.")
-    available = []
-    entries = [
-        ("Matador Dashboard", "dashboard", "dashboard_result", "dashboard_reporting_month", None),
-        ("Lead Source Performance", "leadSources", "lead_source_result", "lead_source_reporting_month", None),
-        ("Email Template Performance", "email", "report_result", "reporting_month", "location"),
-        ("Volie SMS Service Appointments", "volie", "volie_service_result", "volie_service_reporting_month", None),
-    ]
-    for title,category,result_key,month_key,location_key in entries:
-        result=st.session_state.get(result_key)
-        month=st.session_state.get(month_key)
-        if result is not None and month is not None:
-            location=st.session_state.get(location_key) if location_key else None
-            available.append((title,category,result,month,location))
-    if not available:
-        st.warning("Generate a report in one of the other pages first. Reports are available during this Streamlit session.")
-        return
-    labels=[f"{a[0]} — {a[3]:%B %Y}"+(f" — {a[4]}" if a[4] else "") for a in available]
-    selected=available[st.selectbox("Reviewed report",range(len(available)),format_func=lambda i:labels[i])]
-    name,category,result,month,location=selected
-    rows=serialize_report(category,result,location=location)
-    st.caption(f"Publishing {len(rows)} rows · Month: {month:%B %Y} · Category: {name}")
-    st.dataframe(pd.DataFrame(rows),hide_index=True,use_container_width=True)
-    if category=='email':
-        st.caption("Only this location’s email rows will change. Other locations and CTA totals are preserved.")
-    st.warning("The current GitHub Pages site is publicly accessible. Publish only metrics approved for public access.")
+def _inline_dashboard_publish(
+    category: str,
+    result: EmailPerformanceResult | MatadorDashboardResult | LeadSourcePerformanceResult | VolieSmsServiceAppointmentsResult,
+    reporting_month: date,
+    *,
+    location: str | None = None,
+) -> None:
+    """Publish exactly this report from its preview, without changing other reports."""
+    names = {
+        "email": "Email Template Performance",
+        "dashboard": "Matador Dashboard",
+        "leadSources": "Lead Source Performance",
+        "volie": "Volie SMS Service Appointments",
+    }
     try:
-        settings=st.secrets.get("github",{})
-        token=str(settings.get("token", ""))
-        owner=str(settings.get("owner","bdcserpentini"))
-        repository=str(settings.get("repository","serpentini-reports"))
-        branch=str(settings.get("branch","main"))
-    except Exception:
-        token='';owner='bdcserpentini';repository='serpentini-reports';branch='main'
-    if not token:
-        st.error("GitHub token not set. Add [github] settings to .streamlit/secrets.toml as described in SETUP_GITHUB_PAGES.md.")
+        rows = serialize_report(category, result, location=location)
+    except PublishError as exc:
+        st.error(f"Cannot prepare dashboard data: {exc}")
         return
-    st.caption(f"Destination: {owner}/{repository}, branch {branch}, reports.json")
-    confirmed=st.checkbox("I reviewed these values and approve publishing them to the public website",key="github_publish_confirm")
-    if st.button("Publish to Dashboard",type="primary",disabled=not confirmed,use_container_width=True):
+
+    st.markdown('<p class="section-label">Publish to Quarterly Dashboard</p>', unsafe_allow_html=True)
+    st.caption(
+        f"Add or update {names[category]} for {reporting_month:%B %Y}"
+        + (f" — {location}" if location else "")
+        + f" · {len(rows)} rows. Only this report's dashboard data will be replaced."
+    )
+    with st.expander("Review dashboard data before publishing", expanded=False):
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        if category == "email":
+            st.caption("Only this dealership's email records are replaced. Other locations and CTA totals are preserved.")
+        else:
+            st.caption("Only this month and report category are replaced. Other months and report categories are preserved.")
+
+    try:
+        settings = st.secrets.get("github", {})
+        token = str(settings.get("token", ""))
+        owner = str(settings.get("owner", "bdcserpentini"))
+        repository = str(settings.get("repository", "serpentini-reports"))
+        branch = str(settings.get("branch", "main"))
+    except Exception:
+        token = ""
+        owner, repository, branch = "bdcserpentini", "serpentini-reports", "main"
+
+    if not token:
+        st.error("GitHub publishing is not configured. Add [github] credentials in Streamlit Secrets; never commit the token to GitHub.")
+        return
+
+    st.caption(f"Destination: {owner}/{repository} · {branch} · reports.json")
+    st.warning("The quarterly dashboard is publicly accessible. Publish only approved metrics.")
+    # A change in source report, selected month or location requires fresh approval.
+    fingerprint = hashlib.sha256(json.dumps({
+        "category": category,
+        "month": reporting_month_key(reporting_month),
+        "location": location,
+        "rows": rows,
+    }, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+    confirmed = st.checkbox(
+        "I reviewed this report and approve publishing it to the public dashboard",
+        key=f"approve_{category}_{fingerprint}",
+    )
+    if st.button(
+        "Add / Update Quarterly Dashboard",
+        type="primary",
+        disabled=not confirmed,
+        use_container_width=True,
+        key=f"publish_{category}_{fingerprint}",
+    ):
         try:
-            message=publish_report(token,owner,repository,branch,reporting_month_key(month),category,rows,location=location)
+            message = publish_report(
+                token, owner, repository, branch,
+                reporting_month_key(reporting_month), category, rows, location=location,
+            )
             st.success(message)
+            st.caption("If the live dashboard still shows old numbers, refresh it with Ctrl + Shift + R.")
         except PublishError as exc:
             st.error(str(exc))
+
 
 def main() -> None:
     _configure_page()
@@ -912,7 +953,6 @@ def main() -> None:
             "Matador Dashboard",
             "Lead Source Performance",
             "Volie SMS Service Appointments",
-            "Publish to Dashboard",
         ),
     )
     if page == "Email Template Performance":
@@ -921,8 +961,6 @@ def main() -> None:
         _matador_dashboard_page()
     elif page == "Lead Source Performance":
         _lead_source_page()
-    elif page == "Publish to Dashboard":
-        _publish_dashboard_page()
     else:
         _volie_sms_service_page()
 
