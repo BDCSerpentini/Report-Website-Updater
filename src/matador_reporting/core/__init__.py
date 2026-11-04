@@ -1,0 +1,2 @@
+"""Shared report infrastructure."""
+
