@@ -6,7 +6,7 @@ import json
 from datetime import date
 from urllib import error, parse, request
 
-CATEGORIES = ("dashboard", "leadSources", "email", "volie", "bdcAgents")
+CATEGORIES = ("dashboard", "leadSources", "email", "volie", "bdcAgents", "automations", "broadcasts")
 
 
 class PublishError(Exception):
@@ -19,6 +19,10 @@ def reporting_month_key(value: date) -> str:
 
 def serialize_report(category: str, result, *, location: str | None = None) -> list[dict]:
     """Translate reviewed Streamlit results into the existing dashboard's schema."""
+    if category in ("automations", "broadcasts"):
+        if not isinstance(result, list):
+            raise PublishError("Expected validated outreach rows")
+        return result
     if category == "bdcAgents":
         if not isinstance(result, dict) or not isinstance(result.get("agents"), list):
             raise PublishError("Expected validated BDC report data")
@@ -60,6 +64,21 @@ def merge_report(document: dict, month: str, category: str, rows: list[dict], *,
         raise PublishError("Invalid reporting month")
     if document.get('schema_version') != 1 or not isinstance(document.get('months'),dict):
         raise PublishError("Unexpected reports.json format; publication cancelled to avoid losing data")
+    if category in ("automations", "broadcasts"):
+        seen = set()
+        for r in rows:
+            if not isinstance(r, dict) or not isinstance(r.get("location"), str) or not r["location"].strip():
+                raise PublishError("Outreach row must specify a dealership")
+            if r["location"] in seen:
+                raise PublishError("Duplicate outreach dealership")
+            seen.add(r["location"])
+            for key in (("messaged", "engaged", "influenced") if category == "automations" else ("messaged", "influenced")):
+                if not isinstance(r.get(key), int) or isinstance(r.get(key), bool) or r[key] < 0:
+                    raise PublishError("Outreach counts must be nonnegative whole numbers")
+            if category == "broadcasts" and (r.get("broadcasts") is not None and (not isinstance(r["broadcasts"], int) or r["broadcasts"] < 0)):
+                raise PublishError("Invalid broadcast count")
+            if r.get("replyRate") is not None and (not isinstance(r["replyRate"], (int, float)) or not 0 <= r["replyRate"] <= 1):
+                raise PublishError("Invalid outreach reply rate")
     if category == "bdcAgents":
         ids = set()
         for r in rows:

@@ -11,6 +11,7 @@ import pandas as pd
 import streamlit as st
 
 from matador_reporting.core.errors import ReportError
+from matador_reporting.reports.outreach import parse_outreach_csv, OutreachError
 from matador_reporting.reports.bdc_agents.ui import manage_page as _bdc_manage_page, report_page as _bdc_report_page
 from matador_reporting.github_publisher import PublishError, publish_report, serialize_report, reporting_month_key
 from matador_reporting.google_sheets import (
@@ -869,7 +870,7 @@ def _volie_sms_service_page() -> None:
 
 def _inline_dashboard_publish(
     category: str,
-    result: EmailPerformanceResult | MatadorDashboardResult | LeadSourcePerformanceResult | VolieSmsServiceAppointmentsResult,
+    result: EmailPerformanceResult | MatadorDashboardResult | LeadSourcePerformanceResult | VolieSmsServiceAppointmentsResult | list[dict],
     reporting_month: date,
     *,
     location: str | None = None,
@@ -880,6 +881,8 @@ def _inline_dashboard_publish(
         "dashboard": "Matador Dashboard",
         "leadSources": "Lead Source Performance",
         "volie": "Volie SMS Service Appointments",
+        "automations": "Matador Automations",
+        "broadcasts": "Matador Broadcasts",
     }
     try:
         rows = serialize_report(category, result, location=location)
@@ -945,6 +948,38 @@ def _inline_dashboard_publish(
             st.error(str(exc))
 
 
+def _outreach_page() -> None:
+    st.title("Automations & Broadcasts")
+    st.caption("Upload monthly Matador per-dealer CSV reports. Each category is previewed and published independently; other reports are preserved.")
+    reporting_month = _month_year_selector("outreach")
+    automation_tab, broadcast_tab = st.tabs(["Automations", "Broadcasts"])
+    for category, parent in (("automations", automation_tab), ("broadcasts", broadcast_tab)):
+        with parent:
+            st.subheader(category.title())
+            upload = st.file_uploader("Upload Matador per-dealer CSV", type=["csv"], key=f"{category}_upload")
+            if upload is None:
+                st.info("Upload the matching Matador CSV to preview and publish this report.")
+                continue
+            try:
+                rows = parse_outreach_csv(upload.getvalue(), category, reporting_month)
+            except OutreachError as exc:
+                st.error(str(exc))
+                continue
+            messaged = sum(r["messaged"] for r in rows)
+            influenced = sum(r["influenced"] for r in rows)
+            a, b, c = st.columns(3)
+            a.metric("Reporting dealerships", len(rows))
+            b.metric("Customers messaged (reported)", f"{messaged:,}")
+            c.metric("AI-influenced appointments", f"{influenced:,}")
+            if category == "automations":
+                st.metric("Customers engaged", f"{sum(r['engaged'] for r in rows):,}")
+            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+            st.download_button("Download reviewed JSON", json.dumps(rows, indent=2),
+                               file_name=f"{category}_{reporting_month:%Y-%m}.json", mime="application/json",
+                               key=f"{category}_json")
+            _inline_dashboard_publish(category, rows, reporting_month)
+
+
 def main() -> None:
     _configure_page()
     page = st.sidebar.radio(
@@ -954,6 +989,7 @@ def main() -> None:
             "Matador Dashboard",
             "Lead Source Performance",
             "Volie SMS Service Appointments",
+            "Automations & Broadcasts",
             "BDC Agent Performance",
             "Manage BDC Agents",
         ),
@@ -966,6 +1002,8 @@ def main() -> None:
         _lead_source_page()
     elif page == "Volie SMS Service Appointments":
         _volie_sms_service_page()
+    elif page == "Automations & Broadcasts":
+        _outreach_page()
     elif page == "BDC Agent Performance":
         _bdc_report_page()
     else:
