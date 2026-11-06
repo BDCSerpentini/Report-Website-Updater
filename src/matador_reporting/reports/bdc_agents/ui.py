@@ -6,7 +6,7 @@ import uuid
 from datetime import date
 import pandas as pd
 import streamlit as st
-from matador_reporting.github_publisher import PublishError
+from matador_reporting.github_publisher import PublishError, publish_report, serialize_report
 from .processor import BdcReportError, process_csv, validate_roster
 from .roster_store import load_seed, fetch_roster, save_roster
 
@@ -119,7 +119,6 @@ def report_page() -> None:
     st.info(f"Approved roster: {len(roster['agents'])} agents. Matador user roles are ignored.")
     upload=st.file_uploader('Upload Matador Users – All Users CSV',type=['csv'],key='bdc_csv')
     if upload is None:return
-    digest=hashlib.sha256(upload.getvalue() + json.dumps(roster,sort_keys=True).encode()).hexdigest()
     try:res=process_csv(upload.getvalue(),roster)
     except BdcReportError as exc:
         st.error(str(exc));return
@@ -151,5 +150,35 @@ def report_page() -> None:
                 st.dataframe(pd.DataFrame(a['locations']),hide_index=True,use_container_width=True)
     st.download_button('Download agent metrics CSV',df.to_csv(index=False).encode('utf-8-sig'),f'BDC_Agents_{res["month"]}.csv','text/csv')
     st.download_button('Download BDC report JSON',json.dumps({'month':res['month'],'bdcAgents':res['agents']},indent=2).encode(),f'BDC_Agents_{res["month"]}.json','application/json')
-    st.warning('Dashboard publishing is not enabled for BDC agents in this first phase. The existing GitHub Pages BDC tab uses a separate July snapshot; it must be updated to read monthly bdcAgents data before automated publication is safe.')
+    st.divider()
+    st.subheader('Publish to Quarterly Dashboard')
+    st.caption(f"Add or update BDC agent performance for {res['month']}. Existing reporting categories, other months and the approved roster remain unchanged.")
+    rows = serialize_report('bdcAgents', res)
+    with st.expander('Review published agent records'):
+        st.dataframe(df, hide_index=True, use_container_width=True)
+        st.caption('The destination is reports.json. This includes named employee performance and is publicly visible on GitHub Pages.')
+    try:
+        settings = st.secrets.get('github', {})
+        token = str(settings.get('token',''))
+        owner = str(settings.get('owner','bdcserpentini'))
+        repository = str(settings.get('repository','serpentini-reports'))
+        branch = str(settings.get('branch','main'))
+    except Exception:
+        token=''
+        owner,repository,branch='bdcserpentini','serpentini-reports','main'
+    if not token:
+        st.error('Dashboard publishing requires [github] credentials in Streamlit Secrets.')
+        return
+    st.caption(f'Destination: {owner}/{repository} · {branch} · reports.json')
+    st.warning('This is a PUBLIC dashboard. Confirm internal authorization to disclose named agent performance before publishing.')
+    fingerprint = hashlib.sha256(json.dumps({'month':res['month'],'rows':rows},sort_keys=True).encode()).hexdigest()[:16]
+    approved = st.checkbox('I reviewed this report and am authorized to publish named agent performance publicly',key=f'bdc_publish_approve_{fingerprint}')
+    if st.button('Add / Update Quarterly Dashboard',type='primary',disabled=not approved,
+                 use_container_width=True,key=f'bdc_publish_{fingerprint}'):
+        try:
+            message=publish_report(token,owner,repository,branch,res['month'],'bdcAgents',rows)
+            st.success(message)
+            st.caption('Refresh the dashboard with Ctrl + Shift + R if the updated month does not appear immediately.')
+        except PublishError as exc:
+            st.error(str(exc))
     st.caption('The GitHub Pages dashboard is public. Do not publish named employee performance without internal approval.')

@@ -6,7 +6,7 @@ import json
 from datetime import date
 from urllib import error, parse, request
 
-CATEGORIES = ("dashboard", "leadSources", "email", "volie")
+CATEGORIES = ("dashboard", "leadSources", "email", "volie", "bdcAgents")
 
 
 class PublishError(Exception):
@@ -19,6 +19,10 @@ def reporting_month_key(value: date) -> str:
 
 def serialize_report(category: str, result, *, location: str | None = None) -> list[dict]:
     """Translate reviewed Streamlit results into the existing dashboard's schema."""
+    if category == "bdcAgents":
+        if not isinstance(result, dict) or not isinstance(result.get("agents"), list):
+            raise PublishError("Expected validated BDC report data")
+        return result["agents"]
     if category == "dashboard":
         return [{"location": r.location, "leads": r.leads, "engaged": r.engaged_contacts,
                  "appointments": r.total_appointments, "influenced": r.ai_influenced_appointments}
@@ -56,6 +60,24 @@ def merge_report(document: dict, month: str, category: str, rows: list[dict], *,
         raise PublishError("Invalid reporting month")
     if document.get('schema_version') != 1 or not isinstance(document.get('months'),dict):
         raise PublishError("Unexpected reports.json format; publication cancelled to avoid losing data")
+    if category == "bdcAgents":
+        ids = set()
+        for r in rows:
+            if not isinstance(r, dict) or not isinstance(r.get('id'), str) or not r['id'].strip():
+                raise PublishError('Each BDC agent requires a stable ID')
+            if r['id'] in ids:
+                raise PublishError('Duplicate BDC agent ID in report')
+            ids.add(r['id'])
+            if not isinstance(r.get('name'), str) or not r['name'].strip():
+                raise PublishError('Missing BDC agent display name')
+            if any(not isinstance(r.get(k), int) or isinstance(r.get(k), bool) or r[k] < 0
+                   for k in ('messages', 'customers', 'handoffs')):
+                raise PublishError('Invalid BDC counts')
+            rate = r.get('handoffReplyRate')
+            if rate is not None and (not isinstance(rate, (int, float)) or isinstance(rate, bool) or not 0 <= rate <= 1):
+                raise PublishError('BDC reply rates must range from zero to one')
+            if not isinstance(r.get('locations'), list) or not isinstance(r.get('replyRateEstimated'), bool):
+                raise PublishError('Missing BDC location breakdown or reply-rate metadata')
     doc=json.loads(json.dumps(document))
     monthly=doc['months'].setdefault(month,{})
     if not isinstance(monthly,dict):raise PublishError("Malformed existing month")
