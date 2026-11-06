@@ -11,6 +11,7 @@ import pandas as pd
 import streamlit as st
 
 from matador_reporting.core.errors import ReportError
+from matador_reporting.reports.bdc_agents.ui import manage_page as _bdc_manage_page, report_page as _bdc_report_page
 from matador_reporting.github_publisher import PublishError, publish_report, serialize_report, reporting_month_key
 from matador_reporting.google_sheets import (
     service_account_client,
@@ -953,6 +954,8 @@ def main() -> None:
             "Matador Dashboard",
             "Lead Source Performance",
             "Volie SMS Service Appointments",
+            "BDC Agent Performance",
+            "Manage BDC Agents",
         ),
     )
     if page == "Email Template Performance":
@@ -961,8 +964,12 @@ def main() -> None:
         _matador_dashboard_page()
     elif page == "Lead Source Performance":
         _lead_source_page()
-    else:
+    elif page == "Volie SMS Service Appointments":
         _volie_sms_service_page()
+    elif page == "BDC Agent Performance":
+        _bdc_report_page()
+    else:
+        _bdc_manage_page()
 
 
 if __name__ == "__main__":
