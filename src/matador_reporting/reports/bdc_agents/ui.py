@@ -4,6 +4,7 @@ import hashlib
 import json
 import uuid
 from datetime import date
+import calendar
 import pandas as pd
 import streamlit as st
 from matador_reporting.github_publisher import PublishError, publish_report, serialize_report
@@ -119,10 +120,44 @@ def report_page() -> None:
     st.info(f"Approved roster: {len(roster['agents'])} agents. Matador user roles are ignored.")
     upload=st.file_uploader('Upload Matador Users – All Users CSV',type=['csv'],key='bdc_csv')
     if upload is None:return
-    try:res=process_csv(upload.getvalue(),roster)
+    uploaded_bytes = upload.getvalue()
+    try:
+        detected = process_csv(uploaded_bytes, roster)
     except BdcReportError as exc:
-        st.error(str(exc));return
-    st.caption(f"Detected reporting period: {res['period_start']} through {res['period_end']} · {res['month']}")
+        st.error(str(exc))
+        return
+
+    # A file-specific key resets the month selection whenever a different CSV is uploaded.
+    # Always propose the reporting month found in the export rather than today's month.
+    csv_fingerprint = hashlib.sha256(uploaded_bytes).hexdigest()[:16]
+    detected_month = detected['month']
+    detected_year = int(detected_month[:4])
+    years = list(range(min(2025, detected_year), max(date.today().year + 1, detected_year) + 1))
+    month_options = [f'{year}-{month:02d}' for year in years for month in range(1, 13)]
+    selected_month = st.selectbox(
+        'Reporting month',
+        options=month_options,
+        index=month_options.index(detected_month),
+        format_func=lambda value: f'{calendar.month_name[int(value[5:7])]} {value[:4]}',
+        key=f'bdc_reporting_month_{csv_fingerprint}',
+        help='Select the month this report should update. It must agree with the CSV reporting period.',
+    )
+    st.caption(f"CSV reporting period: {detected['period_start']} through {detected['period_end']}")
+    if selected_month != detected_month:
+        st.error(
+            f'Wrong reporting month: you selected {calendar.month_name[int(selected_month[5:7])]} '
+            f'{selected_month[:4]}, but the uploaded CSV is for '
+            f'{calendar.month_name[int(detected_month[5:7])]} {detected_month[:4]}. '
+            'Choose the CSV month or upload the matching export. Nothing can be published until they match.'
+        )
+        return
+    # The selected month is explicitly validated again by the processor.
+    try:
+        res = process_csv(uploaded_bytes, roster, expected_month=selected_month)
+    except BdcReportError as exc:
+        st.error(str(exc))
+        return
+    st.info(f"Selected report: {calendar.month_name[int(selected_month[5:7])]} {selected_month[:4]} · Publishing updates only this month.")
     c1,c2,c3=st.columns(3)
     c1.metric('Matched BDC agents',res['matched_agents'])
     c2.metric('Non-roster users excluded',res['excluded_users'])
